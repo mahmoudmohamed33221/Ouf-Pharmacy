@@ -8,14 +8,14 @@
   var list = ld(KEY, []);
   var syncing = false, pollT = null, sending = false, waits = {};
 
-  var SHORT = { queued: "جاري الإرسال", pending: "في انتظار القبول", accepted: "تم قبول طلبك", preparing: "جاري تجهيز طلبك", delivering: "طلبك في الطريق", arrived: "المندوب وصل", completed: "تم الاستلام" };
+  var SHORT = { queued: "جاري الإرسال", pending: "في انتظار القبول", accepted: "تم قبول طلبك", preparing: "جاري تجهيز طلبك", delivering: "طلبك في الطريق", arrived: "المندوب وصل", completed: "تم الاستلام", cancelled: "تم إلغاء الطلب" };
 
   function save() { sv(KEY, list.slice(0, MAX)); }
   function rid() { return "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
   function stOf(o) { var st = o.status || (o.sent ? "pending" : "queued"); return st === "delivering" && o.arrived ? "arrived" : st; }
   // إجمالي الحساب = حساب الأصناف + التوصيل (للطلبات القديمة اللي معندهاش توصيل بنسيبها زي ما هي)
   function grandOf(o) { return o.fee === undefined ? Number(o.total) || 0 : (Number(o.total) || 0) + (Number(o.fee) || 0); }
-  function isDone(o) { return stOf(o) === "completed"; }
+  function isDone(o) { var st = stOf(o); return st === "completed" || st === "cancelled"; }      // الملغي بيتحسب مع المنتهي (بينزل تحت في المستلمة)
   var dig = function (s) { return String(s == null ? "" : s).replace(/[٠-٩]/g, function (x) { return "٠١٢٣٤٥٦٧٨٩".indexOf(x); }); };
   var tel = function (s) { return dig(s).replace(/\D/g, ""); };
 
@@ -23,7 +23,7 @@
   function add(p) {
     var now = new Date();
     var o = { cid: rid(), ts: now.getTime(), d: now.toLocaleDateString("ar-EG", { weekday: "long", year: "numeric", month: "numeric", day: "numeric" }),
-      t: now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }), items: p.items, total: p.total, sav: p.sav || 0, sent: false, status: "",
+      t: now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }), items: p.items, total: p.total, sav: p.sav || 0, note: String(p.notes || "").trim(), sent: false, status: "",
       payload: { action: "newOrder", name: p.name, phone: p.phone, gov: p.gov || "", addr: p.addr, landmark: p.landmark || "", notes: p.notes || "", total: p.total, location: p.location || "",
         items: p.items.join("\n"), device: (window.MuradGuard && window.MuradGuard.device && window.MuradGuard.device()) || "" } };
     o.payload.cid = o.cid;
@@ -61,20 +61,22 @@
   // ===== سحب الحالة من الشيت =====
   function sync() {
     var url = CFG.ORDERS_URL;
-    var ids = list.filter(function (o) { return o.sent && !(isDone(o) && o.final); }).map(function (o) { return o.cid; });
+    var act = list.filter(function (o) { return o.sent && !(isDone(o) && o.final); }), ids = act.map(function (o) { return o.cid; }), bons = act.map(function (o) { return o.bon || ""; });
     if (!url || syncing || !ids.length) return Promise.resolve();
     syncing = true;
-    return fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "action=myOrders&ids=" + encodeURIComponent(ids.join(",")) + "&_=" + Date.now(), { cache: "no-store" })
+    return fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "action=myOrders&ids=" + encodeURIComponent(ids.join(",")) + "&bons=" + encodeURIComponent(bons.join(",")) + "&_=" + Date.now(), { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (!j || !j.ok) return;
         var by = {}; (j.orders || []).forEach(function (s) { by[s.cid] = s; });
         list.forEach(function (o) {
           var s = by[o.cid]; if (!s) return;
+          if (s.status === "cancelled") { if (!isDone(o)) { o.status = "cancelled"; o.final = true; o.arrived = false; o.cancelledAt = Date.now(); } return; }      // الطلب اتمسح/اتلغى: ينزل في المستلمة بعلامة "تم إلغاء الطلب"
           o.bon = s.bon; o.status = s.status; o.pilotName = s.pilotName; o.pilotPhone = s.pilotPhone; o.shopEta = s.shopEta; o.custEta = s.custEta;
           o.fee = Number(s.fee) || 0; o.km = Number(s.km) || 0; o.hasLoc = !!s.hasLoc; o.priced = s.priced !== false; o.arrived = !!s.arrived;
           if (s.status === "completed") { o.final = true; o.doneAt = s.doneAt || o.doneAt || ""; }
           if (s.total) o.total = s.total;
+          if (s.note !== undefined) o.note = String(s.note || "").trim();      // الملحوظة من الشيت (لو الصيدلية عدّلتها)
         });
         save(); render(); badge();
       })
@@ -87,7 +89,8 @@
     check: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
     phone: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>',
     bike: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="18" r="2.4"/><circle cx="19" cy="18" r="2.4"/><path d="M7.4 18h9.2M16.6 18l-2.3-9.5H11.5M13.6 6h3.6"/><rect x="2.5" y="7.5" width="7.5" height="6" rx="1.2"/></svg>',
-    clock: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+    clock: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    cross: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>'
   };
   // ===== الفاتورة =====
   function parseLines(o) {
@@ -113,7 +116,8 @@
       '<div class="inv-sub">' + (o.bon ? "فاتورة طلب رقم " + o.bon + " · " : "") + esc(o.d || "") + " · " + esc(o.t || "") + "</div>" +
       (o.pilotName ? '<div class="inv-pilot">' + I.bike + "الطيار: <b>" + esc(o.pilotName) + "</b></div>" : "") +
       '<table class="inv-t"><thead><tr><th class="inv-n">اسم الصنف</th><th>سعر القطعة</th><th>العدد</th><th>إجمالي سعر القطع</th></tr></thead><tbody>' + rows +
-      '</tbody><tfoot><tr><td colspan="4"><div class="inv-f"><span>الإجمالي النهائي</span><b>' + num(total) + " " + CURRENCY + "</b></div>" + (Number(o.sav) > 0 ? '<div class="inv-sv"><span>تم توفير مبلغ</span><b>' + num(Number(o.sav)) + " " + CURRENCY + "</b></div>" : "") + "</td></tr></tfoot></table>";
+      '</tbody><tfoot><tr><td colspan="4"><div class="inv-f"><span>الإجمالي النهائي</span><b>' + num(total) + " " + CURRENCY + "</b></div>" + (Number(o.sav) > 0 ? '<div class="inv-sv"><span>تم توفير مبلغ</span><b>' + num(Number(o.sav)) + " " + CURRENCY + "</b></div>" : "") + "</td></tr>" +
+      ((o.note || "").trim() ? '<tr><td colspan="4"><div class="inv-nt"><b>ملحوظة :</b><p>' + esc(String(o.note).trim()) + "</p></div></td></tr>" : "") + "</tfoot></table>";
   }
   var openInv = {};
   var CHEVRON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
@@ -159,8 +163,9 @@
       arr + eta + pilot + note + invBlock(o) + '<div class="od-tot"><span>إجمالي الحساب' + (o.hasLoc && o.priced === false ? '<small class="od-pend">جاري حساب التوصيل…</small>' : "") + "</span><b>" + fmt(grandOf(o)) + "</b></div></article>";
   }
   function doneCard(o) {
-    return '<article class="od-card dn"><div class="od-top"><div><b class="od-bon">' + (o.bon ? "طلب رقم " + o.bon : "طلب") + "</b><small>" + esc(o.d) + " · " + esc(o.t || "") +
-      '</small></div><span class="od-chip s-completed">' + I.check + "تم الاستلام</span></div>" + invBlock(o) +
+    var cx = stOf(o) === "cancelled", chip = cx ? '<span class="od-chip s-cancelled">' + I.cross + "تم إلغاء الطلب</span>" : '<span class="od-chip s-completed">' + I.check + "تم الاستلام</span>";
+    return '<article class="od-card dn' + (cx ? " cx" : "") + '" data-cid="' + o.cid + '"><div class="od-top"><div><b class="od-bon">' + (o.bon ? "طلب رقم " + o.bon : "طلب") + "</b><small>" + esc(o.d) + " · " + esc(o.t || "") +
+      "</small></div>" + chip + "</div>" + invBlock(o) +
       '<div class="od-tot"><span>إجمالي الحساب</span><b>' + fmt(grandOf(o)) + "</b></div></article>";
   }
   var lastSig = "";
@@ -210,5 +215,4 @@
   function cids() { return list.filter(function (o) { return o.cid; }).map(function (o) { return o.cid; }); }
   window.Orders = { cids: cids, whenBon: whenBon, reset: reset, add: add, open: open, sync: sync, render: render, flash: flash, flashNow: flashNow };
 })();
-l
 
